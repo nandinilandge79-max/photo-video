@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Photo to Video</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;600;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #dde1e4; --panel: #f4f6f7; --ink: #1b2328; --muted: #55636c;
+    --line: #b9c1c6; --accent: #22356b; --accent-ink: #fff; --stage: #10151a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.5 "Schibsted Grotesk", system-ui, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 32px 20px 48px;
+         display: grid; grid-template-columns: 340px 1fr; gap: 28px; }
+  h1 { grid-column: 1 / -1; margin: 0; font-size: 2.2rem; font-weight: 800; letter-spacing: -0.02em; }
+  h1 + p { grid-column: 1 / -1; margin: -20px 0 0; color: var(--muted); max-width: 60ch; }
+  .controls { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 20px; }
+  .controls > * + * { margin-top: 18px; }
+  label, legend { font-weight: 600; display: block; margin-bottom: 6px; }
+  fieldset { border: 0; padding: 0; margin: 0; }
+  .style { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; font-weight: 400; }
+  .style small { color: var(--muted); }
+  input[type=file], textarea { width: 100%; font: inherit; padding: 8px; border: 1px solid var(--line);
+         border-radius: 4px; background: #fff; color: var(--ink); }
+  textarea { resize: vertical; min-height: 70px; }
+  #thumb { width: 100%; max-height: 160px; object-fit: cover; border-radius: 4px; display: none; }
+  button { width: 100%; font: inherit; font-weight: 600; padding: 12px; border: 0; border-radius: 4px;
+           background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+  button:disabled { opacity: .5; cursor: progress; }
+  :focus-visible { outline: 3px solid #e0a100; outline-offset: 2px; }
+  .stage { background: var(--stage); border-radius: 6px; min-height: 360px; display: grid;
+           place-items: center; overflow: hidden; color: #9fb0ba; text-align: center; padding: 12px; }
+  video { width: 100%; max-height: 70vh; display: none; }
+  .out { grid-column: 2; }
+  #prompt { color: var(--muted); font-size: .92rem; max-width: 70ch; }
+  #download { display: none; margin-top: 12px; font-weight: 600; color: var(--accent); }
+  #status[data-error] { color: #a4262c; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } .out { grid-column: 1; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Photo to video</h1>
+  <p>Upload a photo, choose a camera move, and get a short clip. Claude reads the photo and writes the motion directions.</p>
+
+  <section class="controls">
+    <div>
+      <label for="photo">Photo</label>
+      <input type="file" id="photo" accept="image/jpeg,image/png,image/gif,image/webp" />
+      <img id="thumb" alt="Selected photo preview" />
+    </div>
+    <fieldset>
+      <legend>Camera style</legend>
+      <label class="style"><input type="radio" name="style" value="cinematic" checked /> Cinematic <small>slow push-in</small></label>
+      <label class="style"><input type="radio" name="style" value="parallax" /> Parallax <small>3D tilt</small></label>
+      <label class="style"><input type="radio" name="style" value="pan" /> Pan <small>sideways drift</small></label>
+      <label class="style"><input type="radio" name="style" value="loop" /> Loop <small>seamless, for social</small></label>
+      <label class="style"><input type="radio" name="style" value="anime" /> Anime <small>painterly rise</small></label>
+    </fieldset>
+    <div>
+      <label for="extra">Extra direction (optional)</label>
+      <textarea id="extra" placeholder="e.g. leaves blowing left to right, golden hour"></textarea>
+    </div>
+    <button id="go">Generate video</button>
+    <p id="status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="stage" id="stage">
+    <p id="placeholder">Your video will appear here.</p>
+    <video id="player" controls loop playsinline></video>
+  </section>
+
+  <section class="out">
+    <p id="prompt"></p>
+    <a id="download" target="_blank" rel="noopener">Download video</a>
+  </section>
+</main>
+
+<script>
+const API = "http://localhost:8000";
+const $ = (id) => document.getElementById(id);
+const DURATION_MS = 5000;
+
+$("photo").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  $("thumb").style.display = f ? "block" : "none";
+  if (f) $("thumb").src = URL.createObjectURL(f);
+});
+
+function setStatus(text, isError = false) {
+  const s = $("status");
+  s.textContent = text;
+  isError ? s.setAttribute("data-error", "") : s.removeAttribute("data-error");
+}
+
+function showVideo(src, label) {
+  $("placeholder").style.display = "none";
+  const v = $("player");
+  v.src = src; v.style.display = "block"; v.play().catch(() => {});
+  const a = $("download");
+  a.href = src; a.download = "photo-video.webm"; a.textContent = label; a.style.display = "inline-block";
+}
+
+// Fallback: render a camera move in the browser when no video API is configured.
+function renderPreview(file, style) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onerror = () => reject(new Error("Could not read that image."));
+    img.onload = () => {
+      const w = 960, h = Math.round((w * img.height / img.width) / 2) * 2;
+      const c = document.createElement("canvas"); c.width = w; c.height = h;
+      const ctx = c.getContext("2d");
+      const moves = {
+        cinematic: (t) => ({ s: 1 + 0.18 * t, x: 0, y: 0, r: 0 }),
+        parallax:  (t) => ({ s: 1.12 + 0.08 * t, x: (t - .5) * w * .06, y: 0, r: (t - .5) * 0.05 }),
+        pan:       (t) => ({ s: 1.2, x: (t - .5) * w * .12, y: 0, r: 0 }),
+        loop:      (t) => ({ s: 1.06 + 0.04 * Math.sin(2 * Math.PI * t), x: 0, y: 0, r: 0 }),
+        anime:     (t) => ({ s: 1.04 + 0.08 * t, x: 0, y: -t * h * .05, r: 0 }),
+      };
+      const rec = new MediaRecorder(c.captureStream(30), { mimeType: "video/webm" });
+      const chunks = [];
+      rec.ondataavailable = (e) => chunks.push(e.data);
+      rec.onstop = () => resolve(URL.createObjectURL(new Blob(chunks, { type: "video/webm" })));
+      const start = performance.now();
+      rec.start();
+      (function frame(now) {
+        const t = Math.min((now - start) / DURATION_MS, 1);
+        const m = moves[style](t * t * (3 - 2 * t)); // ease in-out
+        ctx.save();
+        ctx.translate(w / 2 + m.x, h / 2 + m.y); ctx.rotate(m.r); ctx.scale(m.s, m.s);
+        ctx.drawImage(img, -w / 2, -h / 2, w, h);
+        ctx.restore();
+        t < 1 ? requestAnimationFrame(frame) : rec.stop();
+      })(start);
+    };
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+$("go").addEventListener("click", async () => {
+  const file = $("photo").files[0];
+  if (!file) return setStatus("Choose a photo first.", true);
+  const style = document.querySelector("input[name=style]:checked").value;
+
+  const form = new FormData();
+  form.append("file", file);
+  form.append("style", style);
+  form.append("prompt", $("extra").value);
+
+  $("go").disabled = true;
+  $("download").style.display = "none";
+  setStatus("Claude is studying your photo…");
+  try {
+    const res = await fetch(`${API}/generate`, { method: "POST", body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Something went wrong on the server.");
+    $("prompt").textContent = data.prompt;
+
+    if (data.video_url) {
+      showVideo(data.video_url, "Download video");
+      $("download").removeAttribute("download");
+    } else {
+      setStatus("No video API key set on the server. Rendering a camera-move preview in your browser…");
+      showVideo(await renderPreview(file, style), "Download preview (.webm)");
+    }
+    setStatus("Done.");
+  } catch (err) {
+    setStatus(err.message || "Could not reach the server. Is it running on port 8000?", true);
+  } finally {
+    $("go").disabled = false;
+  }
+});
+</script>
+</body>
+</html>
